@@ -157,7 +157,7 @@ class Top2Vec:
                  embedding_model='doc2vec',
                  embedding_model_path=None,
                  hdbscan_clusters=None,
-                 umap_model=None,
+                 umap_model_2d=None,
                  speed='learn',
                  use_corpus_file=False,
                  document_ids=None,
@@ -318,7 +318,9 @@ class Top2Vec:
         umap_model = umap.UMAP(n_neighbors=15,
                                n_components=5,
                                metric='cosine').fit(self._get_document_vectors())
-        self.umap_model = umap_model
+        self.umap_model_2d = umap.UMAP(n_neighbors=15,
+                               n_components=2,
+                               metric='cosine').fit(self._get_document_vectors())
 
         # find dense areas of document vectors
         logger.info('Finding dense areas of documents')
