@@ -156,6 +156,8 @@ class Top2Vec:
                  min_count=50,
                  embedding_model='doc2vec',
                  embedding_model_path=None,
+                 hdbscan_clusters=None,
+                 umap_model=None,
                  speed='learn',
                  use_corpus_file=False,
                  document_ids=None,
@@ -316,12 +318,14 @@ class Top2Vec:
         umap_model = umap.UMAP(n_neighbors=15,
                                n_components=5,
                                metric='cosine').fit(self._get_document_vectors())
+        self.umap_model = umap_model
 
         # find dense areas of document vectors
         logger.info('Finding dense areas of documents')
         cluster = hdbscan.HDBSCAN(min_cluster_size=15,
                                   metric='euclidean',
                                   cluster_selection_method='eom').fit(umap_model.embedding_)
+        self.hdbscan_clusters = cluster
 
         # calculate topic vectors from dense areas of documents
         logger.info('Finding topics')
