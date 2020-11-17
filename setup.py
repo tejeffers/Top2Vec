@@ -6,7 +6,7 @@ with open("README.md", "r") as fh:
 setuptools.setup(
     name="top2vec",
     packages=["top2vec"],
-    version="1.0.15",
+    version="1.0.16",
     author="Dimo Angelov",
     author_email="dimo.angelov@gmail.com",
     description="Top2Vec learns jointly embedded topic, document and word vectors.",
@@ -33,11 +33,17 @@ setuptools.setup(
         'umap-learn',
         'hdbscan',
         'wordcloud',
-        'tensorflow',
-        'tensorflow_hub',
-        'tensorflow_text',
-        'torch',
-        'sentence_transformers',
-      ],
+    ],
+    extras_require={
+        'sentence_encoders': [
+            'tensorflow',
+            'tensorflow_hub',
+            'tensorflow_text',
+        ],
+        'sentence_transformers': [
+            'torch',
+            'sentence_transformers',
+        ],
+    },
     python_requires='>=3.6',
 )

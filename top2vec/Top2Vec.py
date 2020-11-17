@@ -9,12 +9,13 @@ from gensim.utils import simple_preprocess
 from gensim.parsing.preprocessing import strip_tags
 import umap
 import hdbscan
-from sklearn.metrics.pairwise import cosine_similarity
 from wordcloud import WordCloud
 import matplotlib.pyplot as plt
 from joblib import dump, load
 from sklearn.cluster import dbscan
 import tempfile
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.preprocessing import normalize
 
 try:
     import tensorflow as tf
@@ -31,8 +32,6 @@ try:
     _HAVE_TORCH = True
 except ImportError:
     _HAVE_TORCH = False
-
-from sklearn.feature_extraction.text import CountVectorizer
 
 logger = logging.getLogger('top2vec')
 logger.setLevel(logging.WARNING)
@@ -305,7 +304,7 @@ class Top2Vec:
 
             # embed words
             self.word2index = dict(zip(self.vocab, range(len(self.vocab))))
-            self.word_vectors = np.array(self.embed(self.vocab))
+            self.word_vectors = self._l2_normalize(np.array(self.embed(self.vocab)))
 
             # embed documents
             self.document_vectors = self._embed_documents(train_corpus)
@@ -319,8 +318,8 @@ class Top2Vec:
                                n_components=5,
                                metric='cosine').fit(self._get_document_vectors())
         self.umap_model_2d = umap.UMAP(n_neighbors=15,
-                               n_components=2,
-                               metric='cosine').fit(self._get_document_vectors())
+                                       n_components=2,
+                                       metric='cosine').fit(self._get_document_vectors())
 
         # find dense areas of document vectors
         logger.info('Finding dense areas of documents')
@@ -386,6 +385,14 @@ class Top2Vec:
         """
         return load(file)
 
+    @staticmethod
+    def _l2_normalize(vectors):
+
+        if vectors.ndim == 2:
+            return normalize(vectors)
+        else:
+            return normalize(vectors.reshape(1, -1))[0]
+
     def _embed_documents(self, train_corpus):
 
         self._check_import_status()
@@ -406,7 +413,7 @@ class Top2Vec:
         if extra > 0:
             document_vectors.append(self.embed(train_corpus[current:current + extra]))
 
-        document_vectors = np.array(np.vstack(document_vectors))
+        document_vectors = self._l2_normalize(np.array(np.vstack(document_vectors)))
 
         return document_vectors
 
@@ -416,9 +423,15 @@ class Top2Vec:
         else:
             self.document_vectors = document_vectors
 
-    def _get_document_vectors(self):
+    def _get_document_vectors(self, norm=True):
+
         if self.embedding_model == 'doc2vec':
-            return self.model.docvecs.vectors_docs
+
+            if norm:
+                self.model.docvecs.init_sims()
+                return self.model.docvecs.vectors_docs_norm
+            else:
+                return self.model.docvecs.vectors_docs
         else:
             return self.document_vectors
 
@@ -427,8 +440,9 @@ class Top2Vec:
         unique_labels = set(cluster_labels)
         if -1 in unique_labels:
             unique_labels.remove(-1)
-        self.topic_vectors = np.vstack([self._get_document_vectors()[np.where(cluster_labels == label)[0]]
-                                       .mean(axis=0) for label in unique_labels])
+        self.topic_vectors = self._l2_normalize(
+            np.vstack([self._get_document_vectors(norm=False)[np.where(cluster_labels == label)[0]]
+                      .mean(axis=0) for label in unique_labels]))
 
     def _deduplicate_topics(self):
         core_samples, labels = dbscan(X=self.topic_vectors,
@@ -493,21 +507,21 @@ class Top2Vec:
             extra = document_vectors.shape[0] % batch_size
 
             for ind in range(0, batches):
-                res = cosine_similarity(document_vectors[current:current + batch_size], topic_vectors)
+                res = np.inner(document_vectors[current:current + batch_size], topic_vectors)
                 doc_top.extend(np.argmax(res, axis=1))
                 if dist:
                     doc_dist.extend(np.max(res, axis=1))
                 current += batch_size
 
             if extra > 0:
-                res = cosine_similarity(document_vectors[current:current + extra], topic_vectors)
+                res = np.inner(document_vectors[current:current + extra], topic_vectors)
                 doc_top.extend(np.argmax(res, axis=1))
                 if dist:
                     doc_dist.extend(np.max(res, axis=1))
             if dist:
                 doc_dist = np.array(doc_dist)
         else:
-            res = cosine_similarity(document_vectors, topic_vectors)
+            res = np.inner(document_vectors, topic_vectors)
             doc_top = np.argmax(res, axis=1)
             if dist:
                 doc_dist = np.max(res, axis=1)
@@ -522,13 +536,17 @@ class Top2Vec:
         topic_word_scores = []
 
         if self.embedding_model == 'doc2vec':
-            for topic_vector in topic_vectors:
-                sim_words = self.model.wv.most_similar(positive=[topic_vector], topn=50)
-                topic_words.append([word[0] for word in sim_words])
-                topic_word_scores.append([round(word[1], 4) for word in sim_words])
+            self.model.wv.init_sims()
+            res = np.inner(topic_vectors, self.model.wv.vectors_norm)
+            top_words = np.flip(np.argsort(res, axis=1), axis=1)
+            top_scores = np.flip(np.sort(res, axis=1), axis=1)
+
+            for words, scores in zip(top_words, top_scores):
+                topic_words.append([self.model.wv.index2word[i] for i in words[0:50]])
+                topic_word_scores.append(scores[0:50])
 
         else:
-            res = cosine_similarity(topic_vectors, self.word_vectors)
+            res = np.inner(topic_vectors, self.word_vectors)
             top_words = np.flip(np.argsort(res, axis=1), axis=1)
             top_scores = np.flip(np.sort(res, axis=1), axis=1)
 
@@ -601,7 +619,8 @@ class Top2Vec:
     def _get_word_vectors(self, keywords):
 
         if self.embedding_model == 'doc2vec':
-            return [self.model[word] for word in keywords]
+            self.model.wv.init_sims()
+            return [self.model.wv.vectors_norm[self.model.wv.vocab[word].index] for word in keywords]
         else:
             return [self.word_vectors[self.word2index[word]] for word in keywords]
 
@@ -613,13 +632,13 @@ class Top2Vec:
         for vec in vecs_neg:
             combined_vector -= vec
         combined_vector /= (len(vecs) + len(vecs_neg))
+        combined_vector = self._l2_normalize(combined_vector)
 
         return combined_vector
 
     @staticmethod
     def _search_vectors_by_vector(vectors, vector, num_res):
-        ranks = [res[0] for res in
-                 cosine_similarity(vectors, vector.reshape(1, -1))]
+        ranks = np.inner(vectors, vector)
         indexes = np.flip(np.argsort(ranks)[-num_res:])
         scores = np.array([round(ranks[res], 4) for res in indexes])
 
@@ -629,13 +648,13 @@ class Top2Vec:
         if self.embedding_model != 'distiluse-base-multilingual-cased':
             if not _HAVE_TENSORFLOW:
                 raise ImportError(f"{self.embedding_model} is not available.\n\n"
-                                  "Was not able to import tensorflow. Make sure tensorflow, tensorflow_hub, and "
-                                  "tensorflow_text are installed.")
+                                  "Try: pip install top2vec[sentence_encoders]\n\n"
+                                  "Alternatively try: pip install tensorflow tensorflow_hub tensorflow_text")
         else:
             if not _HAVE_TORCH:
                 raise ImportError(f"{self.embedding_model} is not available.\n\n"
-                                  "Was not able to import sentence_transformers. Make sure torch and "
-                                  "sentence_transformers are installed.")
+                                  "Try: pip install top2vec[sentence_transformers]\n\n"
+                                  "Alternatively try: pip install torch sentence_transformers")
 
     def _check_model_status(self):
         if self.embed is None:
@@ -928,14 +947,13 @@ class Top2Vec:
             self.model.docvecs.count += num_docs
             self.model.docvecs.max_rawint += num_docs
             self.model.docvecs.vectors_docs_norm = None
+            self._set_document_vectors(np.vstack([self._get_document_vectors(norm=False), document_vectors]))
             self.model.docvecs.init_sims()
 
         else:
             docs_training = [' '.join(doc) for doc in docs_processed]
             document_vectors = self._embed_documents(docs_training)
-
-        # add documents do model
-        self._set_document_vectors(np.vstack([self._get_document_vectors(), document_vectors]))
+            self._set_document_vectors(np.vstack([self._get_document_vectors(), document_vectors]))
 
         # update topics
         self._assign_documents_to_topic(document_vectors, hierarchy=False)
@@ -984,7 +1002,7 @@ class Top2Vec:
             self.doc_id2index = dict(zip(keys, values))
 
         # delete document vectors
-        self._set_document_vectors(np.delete(self._get_document_vectors(), doc_indexes, 0))
+        self._set_document_vectors(np.delete(self._get_document_vectors(norm=False), doc_indexes, 0))
 
         if self.embedding_model == 'doc2vec':
             num_docs = len(doc_indexes)
@@ -1184,8 +1202,8 @@ class Top2Vec:
             # find smallest and most similar topics
             sizes = pd.Series(top_sizes).sort_values(ascending=False)
             smallest = sizes.sort_values(ascending=True).index[0]
-            res = cosine_similarity(top_vecs[smallest].reshape(1, -1), top_vecs)
-            most_sim = np.flip(np.argsort(res[0]))[1]
+            res = np.inner(top_vecs[smallest], top_vecs)
+            most_sim = np.flip(np.argsort(res))[1]
 
             # calculate combined topic vector
             top_vec_smallest = top_vecs[smallest]
@@ -1194,8 +1212,8 @@ class Top2Vec:
             top_vec_most_sim = top_vecs[most_sim]
             most_sim_size = top_sizes[most_sim]
 
-            combined_vec = ((top_vec_smallest * smallest_size) + (top_vec_most_sim * most_sim_size)) / (
-                    smallest_size + most_sim_size)
+            combined_vec = self._l2_normalize(((top_vec_smallest * smallest_size) +
+                                               (top_vec_most_sim * most_sim_size)) / (smallest_size + most_sim_size))
 
             # update topic vectors
             ix_keep = list(range(len(top_vecs)))
@@ -1238,8 +1256,9 @@ class Top2Vec:
         doc_top = self._calculate_documents_topic(topic_vectors=top_vecs,
                                                   document_vectors=self._get_document_vectors(),
                                                   dist=False)
-        self.topic_vectors_reduced = np.vstack([self._get_document_vectors()[np.where(doc_top == label)[0]]
-                                               .mean(axis=0) for label in set(doc_top)])
+        self.topic_vectors_reduced = self._l2_normalize(np.vstack([self._get_document_vectors()
+                                                                   [np.where(doc_top == label)[0]]
+                                                                  .mean(axis=0) for label in set(doc_top)]))
 
         self.hierarchy = hierarchy
 
